@@ -1,0 +1,1399 @@
+#! /usr/bin/env perl
+
+# Header {{{
+#==============================================================#
+#==============================================================#
+#
+# Version: 1.0.1
+# Updated: 2022-02-22
+# Author: Helge Kraenz
+#
+# History
+# 1.0.0   Initial    kraenzh
+# 1.0.1   2022-02-22 kraenzh Added support of uniform column
+#
+#==============================================================#
+#==============================================================#
+
+#==============================================================#
+# The source and the computer programming technology embodied
+# herein constitute commercially valuable trade secrets and
+# copyrighted material of Elsevier Information Systems GmbH
+# and its licensors. You are not permitted to copy or disclose
+# or allow to be disclosed any data or information with respect
+# to this source or the computer programming technology
+# embodied herein, or any documentation, drawings,
+# descriptions, models, reports or other media relating hereto
+# except as permitted in writing by Elsevier Information
+# Systems GmbH.
+#==============================================================#
+# Header }}}
+
+# Modules and pragmas {{{
+use strict;
+use warnings;
+use Spreadsheet::Read;
+use Data::Dumper;
+use Math::BigFloat;
+use Getopt::Long;
+use Pod::Usage;
+# Modules and pragmas }}}
+
+# Global variables used in subroutines as well {{{
+our $Version         = 1.0.1;
+our $MinXlsVersion   = 2;
+our $FieldNumber     = 0;
+our $FactNumber      = 0;
+our $TitleNumber     = 0;
+our $SubsetNumber    = 0;
+our $DumpNstContent  = 0;
+our $CurrentFact     = "";
+our $Tax             = {};
+our $Macros          = {};
+our $MaxSubsetNumber = {};
+our $ForeignKey      = {};
+our $MacroName       = undef;
+our $Anweisung       = undef;
+our $ParentFact      = "";
+our $FactName        = undef;
+our $NstTables       = {};
+our @TitleRows       = ();
+our @FactRows        = ();
+our @FieldRows       = ();
+# Global variables used in subroutines as well }}}
+
+# Command line variables {{{
+my  $SpreadsheetFile  = undef;
+my  $DbdirFile        = undef;
+my  $UnitsFile        = undef;
+my  $TablesFile       = undef;
+my  $Man              = undef;
+my  $Help             = undef;
+my  $VersionParameter = undef;
+# Command line variables }}}
+
+# Command line parsing {{{
+my $ParseResult = GetOptions( "dbdir=s" => \$DbdirFile , "help" => \$Help , "man" => \$Man , "spreadsheet=s" => \$SpreadsheetFile , "tables=s" => \$TablesFile , "units=s" => \$UnitsFile , "version" => \$VersionParameter );
+pod2usage( 1 ) if ! $ParseResult;
+# Command line parsing }}}
+
+# Check command line parameters {{{
+pod2usage( 1 ) if $Help;
+pod2usage( -verbose => 2 ) if $Man;
+pod2usage( "$0: No input spreadsheet given" ) if( ! $SpreadsheetFile );
+pod2usage( "$0: No output dbdir file given" ) if( ! $DbdirFile );
+pod2usage( "$0: No output tables file given" ) if( ! $TablesFile );
+pod2usage( "$0: No output units file given" ) if( ! $UnitsFile );
+
+if( $VersionParameter )
+{
+  ml( "This is $0, version $Version\n" );
+  exit;
+}
+# Check command line parameters }}}
+
+# Other variables {{{
+my  $Separator       = "|";
+my  $OutFileHandle   = undef;
+# Other variables }}}
+
+# Read spreadsheet file
+my $Book = Spreadsheet::Read->new( $SpreadsheetFile );
+
+# Check version sheet
+my( $Info , $GeneralDbdir , $GeneralLookup , $Sections ) = analyzeVersionSheet( $Book->sheet( "general" ) );
+
+# Read in versionen sheet
+readVersions( $Book->sheet( $Info->{Tables}->{Versionen} ) );
+
+# Create dbdir.tab {{{
+
+# Open output file
+die "Cannot open otput file $DbdirFile: $!\n", if( ! open( $OutFileHandle , ">" , $DbdirFile ) );
+
+# Dump positions and general section
+dumpHeaders( "DB_DBDIR" , $GeneralDbdir , $OutFileHandle , $Separator );
+
+# Dump Files section
+dumpSection( $Sections->{"FILES"} , $OutFileHandle , $Separator );
+
+# Dump Coupleindex section
+dumpSection( $Sections->{"COUPLEINDEX"} , $OutFileHandle , $Separator );
+
+# Dump Couplefields section
+dumpSection( $Sections->{"COUPLEFIELDS"} , $OutFileHandle , $Separator );
+
+# Dump Keywords section
+dumpSection( $Sections->{"KEYWORDS"} , $OutFileHandle , $Separator );
+
+# Dump tablespaces section
+dumpSection( $Sections->{"TABLESPACES"} , $OutFileHandle , $Separator );
+
+# Read in and dump main sheet
+handleDbDir( $Book->sheet( $Info->{Tables}->{DbDir} ) , $OutFileHandle , $Separator );
+
+# Close output file
+close( $OutFileHandle );
+
+# Write success message
+ml( "Created dbdir, file name $DbdirFile\n" );
+
+# Create dbdir.tab }}}
+
+# Create units.tab {{{
+
+# Open output file
+die "Cannot open otput file $UnitsFile: $!\n", if( ! open( $OutFileHandle , ">" , $UnitsFile ) );
+
+# Read in positionen sheet
+#my $EinheitenPositions = readTables( $Book->sheet( $Info->{Tables}->{Positionen} ) , "Einheiten" );
+
+# Dump positions and general section
+dumpHeaders( "DB_EINH" , undef , $OutFileHandle , $Separator );
+
+# Read in and dump units sheet
+handleUnits( $Book->sheet( $Info->{Tables}->{Einheiten} ) , $OutFileHandle , $Separator );
+
+# Close output file
+close( $OutFileHandle );
+
+# Write success message
+ml( "Created units, file name $UnitsFile\n" );
+
+# Create units.tab }}}
+
+# Create tables.tab {{{
+
+# Open output file
+die "Cannot open otput file $TablesFile: $!\n", if( ! open( $OutFileHandle , ">" , $TablesFile ) );
+
+# Dump positions and general section
+dumpHeaders( "DB_NST" , $GeneralLookup , $OutFileHandle , $Separator );
+
+# Read in and dump units sheet
+my $NstSheet = $DumpNstContent ? $Book->sheet( $Info->{Tables}->{Nst} ) : undef;
+handleLookup( $NstSheet , $OutFileHandle , $Separator );
+
+# Close output file
+close( $OutFileHandle );
+
+# Write success message
+ml( "Created units, file name $TablesFile\n" );
+
+# Create tables.tab }}}
+
+exit;
+
+# readVersions {{{
+# This is pretty straight forward - simply copy the content
+# of Einheiten sheet to ascii file
+sub readVersions
+{
+  my $Vers = shift;
+
+  my $Anweisung = "";
+
+  for my $i ( 1..$Vers->maxrow )
+  {
+    my @Row = $Vers->row( $i );
+    @Row = map{ defined $_ ? $_ : "" } @Row;
+
+    # Check for "Anweisung" line {{{
+    if( $Row[5] && ! $Row[0] )
+    {
+      if( $Row[5] eq "ENDE" )
+      {
+        $Anweisung = "";
+      }
+      else
+      {
+        $Anweisung = $Row[5];
+      }
+      next;
+    }
+    # Check for "Anweisung" line }}}
+
+    next if ! $Anweisung;
+    next if ! $Row[0];
+
+    $Info->{Versionen}->{$Row[0]}->{Key}         = $Row[0];
+    $Info->{Versionen}->{$Row[0]}->{Modul}       = $Row[1];
+    $Info->{Versionen}->{$Row[0]}->{Bezeichner}  = $Row[2];
+    $Info->{Versionen}->{$Row[0]}->{Version}     = $Row[3];
+    $Info->{Versionen}->{$Row[0]}->{Version_alt} = $Row[4];
+
+    $Info->{Versionen}->{$Row[0]}->{Version_norm}     = sprintf( "%d.%d.%d" , split( /\./ , $Row[3] ) );
+    $Info->{Versionen}->{$Row[0]}->{Version_norm_alt} = sprintf( "%d.%d.%d" , split( /\./ , $Row[4] ) );
+
+
+
+    pop( @Row );
+
+  }
+}
+# readVersions }}}
+
+# dumpHeaders {{{
+sub dumpHeaders
+{
+  my $Type = shift;
+  my $Gen  = shift;
+  my $Fh   = shift;
+  my $Sep  = shift;
+
+  # Read in and dump positions sheet
+  handlePositions( $Book->sheet( $Info->{Tables}->{Positionen} ) , $Type , $OutFileHandle , $Separator );
+
+  # Dump General section
+  handleGeneral( $Type , $Gen , $OutFileHandle );
+
+}
+# dumpHeaders }}}
+
+# handleLookup {{{
+# This is pretty straight forward - simply copy the content
+# of Einheiten sheet to ascii file
+sub handleLookup
+{
+  my $Sheet = shift;
+  my $Fh    = shift;
+  my $Sep   = shift;
+
+  my $Anweisung = "";
+
+  my $Lookup = {};
+
+  for my $Table ( sort keys %$NstTables )
+  {
+    $Lookup->{$Table}->{max} = 0;
+    $Lookup->{$Table}->{0} = "$Table|0|Ersteintrag||";
+  }
+
+  # Dump the content of nst spreadsheet only on request {{{
+  # Typically this is not needed because the NST content
+  # in the spreadsheet is outdated.
+  if( $Sheet )
+  {
+    for my $i ( 1..$Sheet->maxrow )
+    {
+      my @Row = $Sheet->row( $i );
+      @Row = map{ defined $_ ? $_ : "" } @Row;
+
+      # Check for "Anweisung" line {{{
+      if( $Row[4] && ! $Row[0] )
+      {
+        if( $Row[4] eq "ENDE" )
+        {
+          $Anweisung = "";
+        }
+        else
+        {
+          $Anweisung = $Row[4];
+        }
+        next;
+      }
+      # Check for "Anweisung" line }}}
+
+      next if ! $Anweisung;
+
+
+
+      splice( @Row , 3 );
+      @Row = ( @Row , "" , "" );
+
+      my $Table = $Row[0];
+      my $Index = $Row[1];
+      if( $Lookup->{$Table}->{$Index} )
+      {
+        die "Duplicate entry in lookup table, for table $Table, index $Index\n";
+      }
+      $Lookup->{$Table}->{max} = $Index > $Lookup->{$Table}->{max} ? $Index : $Lookup->{$Table}->{max};
+      $Lookup->{$Table}->{$Index} = join( $Sep , @Row );
+    }
+  }
+  # Dump the content of nst spreadsheet on on request }}}
+
+  dl( $Fh , "[TABLES]\n" );
+
+  for my $Table ( sort keys %$Lookup )
+  {
+    for my $Index ( 0..$Lookup->{$Table}->{max} )
+    {
+      if( ! defined $Lookup->{$Table}->{$Index} )
+      {
+        ml( "No entry for table $Table, index $Index found\n" );
+        #die "No entry for table $Table, index $Index found\n";
+        next;
+      }
+      dl( $Fh , $Lookup->{$Table}->{$Index} . "\n" );
+      #print $Fh $Lookup->{$Table}->{$Index} . "\n";
+    }
+  }
+
+}
+# handleLookup }}}
+
+# handleUnits {{{
+# This is pretty straight forward - simply copy the content
+# of Einheiten sheet to ascii file
+sub handleUnits
+{
+  my $Uni = shift;
+  my $Fh  = shift;
+  my $Sep = shift;
+
+  my $Anweisung = "";
+
+  dl( $Fh , "[UNITS]\n" );
+  #print $Fh "[UNITS]\n";
+
+  for my $i ( 1..$Uni->maxrow )
+  {
+    my @Row = $Uni->row( $i );
+    @Row = map{ defined $_ ? $_ : "" } @Row;
+
+    # Check for "Anweisung" line {{{
+    if( $Row[7] && ! $Row[0] )
+    {
+      if( $Row[7] eq "ENDE" )
+      {
+        $Anweisung = "";
+      }
+      else
+      {
+        $Anweisung = $Row[7];
+      }
+      next;
+    }
+    # Check for "Anweisung" line }}}
+
+    next if ! $Anweisung;
+
+    pop( @Row );
+
+    my$x = Math::BigFloat->new( $Row[5] ||0);
+    $Row[5] = $x->bstr();
+    $x = Math::BigFloat->new( $Row[6] ||0);
+    $Row[6] = $x->bstr();
+
+    dl( $Fh , join( $Sep , @Row ) . "\n" );
+    #print $Fh join( $Sep , @Row ) . "\n";
+  }
+}
+# handleUnits }}}
+
+# dumpSection {{{
+# Simply dumps the content of a section
+sub dumpSection
+{
+  my $Hash    = shift;
+  my $Fh      = shift;
+  my $Sep     = shift;
+
+  my $Name    = $Hash->{name};
+  my $Content = $Hash->{data};
+  my $ESep    = "\\$Sep";
+
+  dl( $Fh , "[$Name]\n" );
+  #print $Fh "[$Name]\n";
+  for my $Row ( @$Content )
+  {
+    my $Line = join( $Sep , @$Row );
+
+    $Line =~ s{$ESep+$}{};
+    dl( $Fh , "$Line\n" );
+    #print $Fh "$Line\n";
+  }
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+
+  ml( "Dumped section $Name\n" );
+}
+# dumpSection }}}
+
+# handleGeneral {{{
+# Simply dumps the content of given array reference to the file
+sub handleGeneral
+{
+  my $Type = shift;
+  my $Gen  = shift;
+  my $Fh   = shift;
+
+  # Dump positionen sheet to positions section
+  dl( $Fh , "[GENERAL]\n" );
+  #print $Fh "[GENERAL]\n";
+  dl( $Fh , "VERSION=$Info->{Versionen}->{$Type}->{Version_norm};\n" );
+  #print $Fh "VERSION=$Info->{Versionen}->{$Type}->{Version_norm};\n";
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+  if( $Gen )
+  {
+    for my $Line ( @$Gen )
+    {
+      dl( $Fh , "$Line\n" );
+      #print $Fh "$Line\n";
+    }
+    dl( $Fh , "\n" );
+    #print $Fh "\n";
+  }
+}
+# handleGeneral }}}
+
+# handlePositions {{{
+# Create position section from postion sheet in input file
+sub handlePositions
+{
+  my $Pos  = shift;
+  my $Type = shift;
+  my $Fh   = shift;
+  my $Sep  = shift;
+
+  # Read in positionen sheet
+  my $Positions = readTables( $Pos , $Type );
+
+  # Dump positionen sheet to positions section
+  dl( $Fh , "[POSITIONS]\n" );
+  #print $Fh "[POSITIONS]\n";
+  for my $Table ( sort keys %$Positions )
+  {
+    my @Max = ();
+    my $Format = "";
+
+    for my $Row ( @{$Positions->{$Table}->{data}} )
+    {
+      for my $i ( 0..( scalar( @$Row )-1 ) )
+      {
+        my $Len = length( $Row->[$i] );
+        $Max[$i] = $Len if ! defined $Max[$i] || $Len > $Max[$i];
+      }
+    }
+    $Format = "%s$Sep" . join( $Sep , map{ "%-$_"."s" } @Max ) . "\n";
+
+    for my $Row ( @{$Positions->{$Table}->{data}} )
+    {
+      #print $Fh join( $Sep , ( $Table , @$Row ) ) . "\n";
+      dl( $Fh , sprintf( $Format , $Table , @$Row ) );
+      #printf $Fh $Format , $Table , @$Row;
+    }
+    dl( $Fh , "\n" );
+    #print $Fh "\n";
+  }
+}
+# handlePositions }}}
+
+# readTables {{{
+# Reads all tables in a given sheet. Tables start with cell #1 being filled
+# while all others are empty. The content of cell #1 is the table name.
+# Tables end with cell #1 filled with "ENDE" while all others are empty. 
+# Table names and "ENDE" are treated case sensitive.
+sub readTables
+{
+  my $Sheet       = shift;
+  my $TargetSheet = shift;
+
+  my $Tables = {};
+
+  # Loop over each row in the sheet {{{
+  my $Section  = undef;
+  my $ValidFor = undef;
+  for my $i ( 1..$Sheet->maxrow )
+  {
+    # Get rows and count number of non-empty columns {{{
+    my @Row = $Sheet->row( $i );
+    my $Cols = scalar( grep{ defined && ! /^\s*$/ } @Row );
+    # Get rows and count number of non-empty columns }}}
+
+    # Handle start and end of a table {{{
+    if( $Row[0] && $Cols <= 2 )
+    {
+      my $NewSection = $Row[0];
+      if( $Section )
+      {
+        if( $NewSection eq "ENDE" )
+        {
+          ml( "Found end of section $Section\n" );
+          $Section = undef;
+          $ValidFor = undef;
+        }
+        else
+        {
+          die "Found new section start, sheet " . $Sheet->label . " row $i while previous section $Section not closed.\n";
+        }
+      }
+      else
+      {
+        $ValidFor = $Row[1];
+        die "Found already defined section $NewSection.\n" if $Tables->{$NewSection};
+        $Section = $NewSection;
+        ml( "Found new section $Section\n" );
+        if( ( $TargetSheet && $TargetSheet eq $ValidFor ) )
+        {
+          $Tables->{$Section}->{cols} = undef;
+          $Tables->{$Section}->{rows} = 0;
+        }
+      }
+      next;
+    }
+    # Handle start and end of a table }}}
+
+    # Handle rows without content {{{
+    elsif( $Cols == 0 )
+    {
+      ml( "Found empty row $i\n" );
+    }
+    # Handle rows without content }}}
+
+    # Handle rows with content {{{
+    elsif( $Cols >= 1 )
+    {
+      if( ( $TargetSheet && $TargetSheet ne $ValidFor ) )
+      {
+        next;
+      }
+      die "No section defined while scanning row $i of length $Cols.\n" if ! $Section;
+      push( @{$Tables->{$Section}->{data}} , [ @Row ] );
+      $Tables->{$Section}->{rows}++;
+      $Tables->{$Section}->{cols} = scalar( @Row ) if ! $Tables->{$Section}->{cols};
+    }
+    # Handle rows with content }}}
+
+    # Handle unexpected rows {{{
+    else
+    {
+      die "Unexpected content, sheet " . $Sheet->label . " row $i.\n";
+    }
+    # Handle unexpected rows }}}
+  }
+
+  if( $Section )
+  {
+    die "Section $Section was not terminated.\n";
+  }
+  # Loop over each row in the sheet }}}
+
+  $Tables;
+}
+# readTables }}}
+
+# handleDbDir {{{
+# The procedure reads the sheet twice. During first scan it remembers all
+# instructions (macros etc) required for the second run.
+sub handleDbDir
+{
+  my $Dd  = shift;
+  my $Fh  = shift;
+  my $Sep = shift;
+
+  # Extract macros and max subset numbers {{{
+  # This is the first scan loop. Stores all macros in a hash named "Macros"
+  # Macros are defined in section "ADD" only.
+  for my $i ( 1..$Dd->maxrow )
+  {
+    my @Row = $Dd->row( $i );
+    @Row = map{ defined $_ ? $_ : "" } @Row;
+
+    if( $Row[15] && ! $Row[0] )
+    {
+      $Anweisung = $Row[15];
+      $FactNumber = 0;
+    }
+    next if ! $Anweisung;
+    if( $Anweisung eq "ENDE" )
+    {
+      $Anweisung = "";
+      $FactNumber = 0;
+      next;
+    }
+    handleMacroLine( $i , @Row )  if $Anweisung eq "ADD";
+    if( $Anweisung eq "MERKMAL" )
+    {
+      $Row[2] =~ s{\s}{}g;
+      if( $Row[2] =~ /^(?:I|S|D|C|L|W|R)$/ )
+      {
+        my $SubsetNumber = $Row[10] || 0;
+        my $ThisFactName = $Row[1];
+        next if ! $ThisFactName;
+        $ThisFactName =~ s{\..*}{};
+        $MaxSubsetNumber->{$ThisFactName} = $SubsetNumber if ! $MaxSubsetNumber->{$ThisFactName} || $SubsetNumber >= $MaxSubsetNumber->{$ThisFactName};
+      }
+    }
+
+  }
+  ml( "Extracted macros from dbdir tab\n" );
+  # Extract macros and max subset numbers }}}
+
+  #print Dumper( $MaxSubsetNumber );exit;
+
+  # Loop over rows {{{
+  for my $i ( 1..$Dd->maxrow )
+  {
+    # Normalize row {{{
+    my @Row = $Dd->row( $i );
+    @Row = map{ $_||"" } @Row;
+    # Normalize row }}}
+
+    # Skip unwanted parts {{{
+    # Take only MERKMAL and SPEZ into account
+    if( $Row[15] && ! $Row[0] )
+    {
+      $Anweisung = $Row[15];
+      $Anweisung = undef if $Anweisung eq "ENDE";
+      $FactNumber = 0;
+      $ParentFact = "";
+      next;
+    }
+    next if ! $Anweisung;
+    next if $Anweisung !~ /^(?:MERKMAL|SPEZ)$/;
+    # Skip unwanted parts }}}
+
+    # Handle each row {{{
+    # 1. Skip empty rows
+    # 2. Handle FIELD rows
+    # 3. Handle TITLE rows
+    # 4. Handle FACTS rows
+    $Row[2] =~ s{\s}{}g;
+    if( ! $Row[2] )
+    {
+      next;
+    }
+    elsif( $Row[2] =~ /^(?:I|S|D|C|L|W|R)$/ )
+    {
+      my $TempRow = handleFieldRow( $i , @Row );
+      push( @FieldRows , $TempRow ) if $TempRow;
+    }
+    elsif( $Row[2] eq "O" )
+    {
+      push( @TitleRows , handleTitleRow( $i , @Row ) );
+    }
+    elsif( $Row[2] eq "M" )
+    {
+      push( @FactRows , handleFactRow( $i , @Row ) );
+    }
+    else
+    {
+      die "Data type '$Row[2]', row $i, not supported\n";
+    }
+    # Handle each row }}}
+  }
+  ml( "Scanned all lines from dbdir tab\n" );
+  # Loop over rows }}}
+  
+  # Dump FOREIGNKEYS {{{
+  dl( $Fh , "[FOREIGNKEYS]\n" );
+  #print $Fh "[FOREIGNKEYS]\n";
+  for my $SourceTable ( sort keys %$ForeignKey )
+  {
+    for my $SourceColumn ( sort keys %{$ForeignKey->{$SourceTable}} )
+    {
+      for my $TargetTable ( sort keys %{$ForeignKey->{$SourceTable}->{$SourceColumn}} )
+      {
+        for my $TargetColumn ( sort keys %{$ForeignKey->{$SourceTable}->{$SourceColumn}->{$TargetTable}} )
+        {
+          dl( $Fh , "$SourceTable|$SourceColumn|$TargetTable|$TargetColumn\n" );
+          #print $Fh "$SourceTable|$SourceColumn|$TargetTable|$TargetColumn\n";
+        }
+      }
+    }
+  }
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+  ml( "Dumped foreign keys section\n" );
+  # Dump TITLES }}}
+  
+  # Dump TITLES {{{
+  dl( $Fh , "[TITLES]\n" );
+  #print $Fh "[TITLES]\n";
+  for my $Row ( @TitleRows )
+  {
+    dl( $Fh , join( $Sep , @$Row ) . "\n" );
+    #print $Fh join( $Sep , @$Row ) . "\n";
+  }
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+  ml( "Dumped titles section\n" );
+  # Dump TITLES }}}
+  
+  # Dump FACTS {{{
+  dl( $Fh , "[FACTS]\n" );
+  #print $Fh "[FACTS]\n";
+  for my $Row ( @FactRows )
+  {
+    dl( $Fh , join( $Sep , @$Row ) . "\n" );
+    #print $Fh join( $Sep , @$Row ) . "\n";
+  }
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+  ml( "Dumped facts section\n" );
+  # Dump FACTS }}}
+
+  # Dump FIELD {{{
+  dl( $Fh , "[FIELDS]\n" );
+  #print $Fh "[FIELDS]\n";
+  for my $Row ( @FieldRows )
+  {
+    dl( $Fh , join( $Sep , @$Row ) . "\n" );
+    #print $Fh join( $Sep , @$Row ) . "\n";
+  }
+  dl( $Fh , "\n" );
+  #print $Fh "\n";
+  ml( "Dumped fields section\n" );
+  # Dump FIELDS }}}
+}
+# handleDbDir }}}
+
+# handleMacroLine {{{
+# Read in a line belonging to macro section.
+# Line will be added to corresponding macro definition.
+sub handleMacroLine
+{
+  my( $LineNumber , @Row ) = @_;
+
+  # If the first 3 fields are empty, the row will not be considered
+  return if( ! $Row[0] || ! $Row[1] || ! $Row[2] );
+
+  # Header row of a macro, will not be stored but opens up the macro
+  if( $Row[2] =~ /ADD/ )
+  {
+    $MacroName = $Row[1];
+    $Macros->{$MacroName}->{action} = $Row[15];
+    ml( "Found macro definition $MacroName\n" );
+  }
+  # Body rows of a macro
+  else
+  {
+    die "No Macro name given in sheet dbdir, line $LineNumber\n" if ! $MacroName;
+
+    for my $i ( qw( 3 4 5 20 ) )
+    {
+      $Row[$i] = $Row[$i] || 0;
+      $Row[$i] = 1 if $Row[$i] eq "J";
+    }
+
+    push( @{$Macros->{$MacroName}->{rows}} , [ @Row ] );
+  }
+}
+# handleMacroLine }}}
+
+# handleTitleRow {{{
+# Sample lines and mapping {{{
+  # ID|MERKMAL|2 |IDDATA|Common attributes|  |  |  |O  |0  |0  |  |  |  |0  |0  |0  |0  |  |  |1  |0  | 
+  # 01|     02|03|    04|               05|06|07|08| 09| 10| 11|12|13|14| 15| 16| 17| 18|19|20| 21| 22|23
+  #
+  # TITLES|FACTNAME |3|0 (Parent)
+  # TITLES|GROUP    |3|0 (Anweisung aus der entsprechenden Zeile)
+  # TITLES|NUMBER   |0|0 (Generated)
+  # TITLES|FIELDNAME|3|1 1  B
+  # TITLES|FULLNAME |3|0 0  A
+  # TITLES|ROLE     |3|0 11 L
+  # TITLES|SECTION  |3|0 12 M
+  # TITLES|REFERENCE|3|0 13 N
+  # TITLES|DATATYPE |2|0 2  C
+  # TITLES|LENGTH   |0|0 6  G
+  # TITLES|DECIMAL  |0|0 (Konstant 0)
+  # TITLES|FORMAT   |3|0 (Konstant "")
+  # TITLES|STANDARD |3|0 9  J
+  # TITLES|INDEX    |3|0 17 R
+  # TITLES|SUBSET   |0|0 10 K
+  # TITLES|RANGE    |0|0 3  D
+  # TITLES|REQUIRED |0|0 4  E
+  # TITLES|MULTI    |2|0 5  F
+  # TITLES|LOOKUP   |3|0 7  H
+  # TITLES|DESCRIPT |3|0 19 T
+  # TITLES|DISPROW  |0|0 (Aus Hierarchie)
+  # TITLES|INFORCE  |0|0 20 U
+  # TITLES|TABLENAME|3|0 16 Q
+  # TITLES|SEARCH   |2|0
+  # TITLES|SHORTNAME|3|0
+# Sample lines and mapping }}}
+sub handleTitleRow
+{
+  my( $LineNumber , @Row ) = @_;
+
+  # Build hierarchy {{{
+  my $Key = $Row[14];
+  my $Name = $Row[1];
+  die "No name entry for object in row $LineNumber found.\n" if ! $Name;
+  die "No hierarchy entry for object $Name found.\n" if ! $Key;
+
+  $Tax->{$Key}->{name} = $Name;
+  $Tax->{$Key}->{parent} = "";
+  if( $Key =~ /:/ )
+  {
+    ( my $ParentKey = $Key ) =~ s{:\d+$}{};
+    $Tax->{$Key}->{parent} = $Tax->{$ParentKey}->{name};
+  }
+  $ParentFact = $Name;
+  # Build hierarchy }}}
+
+  # Increase title number and reset fact number
+  $TitleNumber++;
+  $FactNumber = 0;
+  # Get last digit of hierarchy
+  ( my $Hier = $Key ) =~ s{^.*:}{};
+
+  return[$Tax->{$Key}->{parent} , $Anweisung , $TitleNumber , $Name , $Row[0] , $Row[11] , $Row[12] , $Row[13] , $Row[2] , $Row[6] || 0 , 0 , "" , $Row[9] , $Row[17] , $Row[10] || 0 , $Row[3] || 0 , $Row[4] || 0 , $Row[5] || 0 , $Row[7] , $Row[19] , $Hier , $Row[20] || 0 , $Row[16] ];
+}
+# handleTitleRow }}}
+
+# handleFactRow {{{
+# Sample line and mapping {{{
+  # IDDATA|MERKMAL|  1|BEIL|Identification|I1,Y|MERKMALE|  | U| 0| 0|  |  |  | 0| 0| 1| 0|  |  | 1| 0|T_BEIL
+  #     01|     02|03|   04|            05|  06|      07|08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23
+  #
+  # FACTS|FACTNAME |3|0 (Parent)
+  # FACTS|GROUP    |3|0 (Anweisung aus der entsprechenden Zeile)
+  # FACTS|NUMBER   |0|0 (Generated)
+  # FACTS|FIELDNAME|3|1 1  B
+  # FACTS|FULLNAME |3|0 0  A
+  # FACTS|ROLE     |3|0 11 L
+  # FACTS|SECTION  |3|0 12 M
+  # FACTS|REFERENCE|3|0 13 N
+  # FACTS|DATATYPE |2|0 2  C
+  # FACTS|LENGTH   |0|0 6  G
+  # FACTS|DECIMAL  |0|0 (Konstant 0)
+  # FACTS|FORMAT   |3|0 (Konstant "")
+  # FACTS|STANDARD |3|0 9  J
+  # FACTS|INDEX    |3|0 17 R
+  # FACTS|SUBSET   |0|0 10 K
+  # FACTS|RANGE    |0|0 3  D
+  # FACTS|REQUIRED |0|0 4  E
+  # FACTS|MULTI    |2|0 5  F
+  # FACTS|LOOKUP   |3|0 7  H
+  # FACTS|DESCRIPT |3|0 19 T
+  # FACTS|DISPROW  |0|0 (Aus Hierarchie)
+  # FACTS|INFORCE  |0|0 20 U
+  # FACTS|TABLENAME|3|0 16 Q
+  # FACTS|SEARCH   |2|0
+  # FACTS|SHORTNAME|3|0
+  # FACTS|DISPLAY  |2|0
+  # FACTS|TABINFO  |3|0
+# Sample line and mapping }}}
+sub handleFactRow
+{
+  my( $LineNumber , @Row ) = @_;
+
+  # Increase field number and save it. Otherwise macros will disturb it.
+  $FieldNumber++;
+  my $FactFieldNumber = $FieldNumber;
+  #  Increase fact number
+  $FactNumber++;
+  # Define abbreviations and apply minor corrections
+  $FactName = $Row[1];
+
+  # If a table is given, the data type has to be changed from 
+  # "M" to "U". If no table is given the table has to be changed
+  # to T_MRKML
+  if( $Row[16] )
+  {
+    $Row[2] = "U";
+  }
+  else
+  {
+    $Row[16] = "T_MRKML";
+  }
+
+  # Change "J" into "1" for ceration rows
+  for my $i ( qw( 3 4 5 20 ) )
+  {
+    $Row[$i] = $Row[$i] || 0;
+    $Row[$i] = 1 if $Row[$i] eq "J";
+  }
+
+  injectMacros( "FACT" , $LineNumber , @Row );
+
+  $CurrentFact = $Row[16];
+
+  # Return facts row
+  return[ $ParentFact , $Anweisung , $FactFieldNumber , $Row[1] , $Row[0] , $Row[11] , $Row[12] , $Row[13] , $Row[2] , $Row[6] || 0 , 0 , "" , $Row[9] , $Row[17] , $Row[10] || 0 , $Row[3] || 0 , $Row[4] || 0 , $Row[5] || 0 , $Row[7] , $Row[19] , $FactNumber , $Row[20] || 0 , $Row[16] ];
+}
+# handleFactRow }}}
+
+# handleFieldRow {{{
+# Sample data {{{
+# IDDATA|MERKMAL|  1|BEIL|Identification|I1,Y|MERKMALE|  | U| 0| 0|  |  |  | 0| 0| 1| 0|  |  | 1| 0|T_BEIL
+#     01|     02|03|   04|            05|  06|      07|08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23
+#
+# FACTS|FACTNAME |3|0 (Parent)
+# FACTS|GROUP    |3|0 (Anweisung aus der entsprechenden Zeile)
+# FACTS|NUMBER   |0|0 (Generated)
+# FACTS|FIELDNAME|3|1 1  B
+# FACTS|FULLNAME |3|0 0  A
+# FACTS|ROLE     |3|0 11 L
+# FACTS|SECTION  |3|0 12 M
+# FACTS|REFERENCE|3|0 13 N
+# FACTS|DATATYPE |2|0 2  C
+# FACTS|LENGTH   |0|0 6  G
+# FACTS|DECIMAL  |0|0 (Konstant 0)
+# FACTS|FORMAT   |3|0 (Konstant "")
+# FACTS|STANDARD |3|0 9  J
+# FACTS|INDEX    |3|0 17 R
+# FACTS|SUBSET   |0|0 10 K
+# FACTS|RANGE    |0|0 3  D
+# FACTS|REQUIRED |0|0 4  E
+# FACTS|MULTI    |2|0 5  F
+# FACTS|LOOKUP   |3|0 7  H
+# FACTS|DESCRIPT |3|0 19 T
+# FACTS|DISPROW  |0|0 (Aus Hierarchie)
+# FACTS|INFORCE  |0|0 20 U
+# FACTS|TABLENAME|3|0 16 Q
+# FACTS|SEARCH   |2|0
+# FACTS|SHORTNAME|3|0
+# FACTS|DISPLAY  |2|0
+# FACTS|TABINFO  |3|0
+# Sample data }}}
+sub handleFieldRow
+{
+  my( $LineNumber , @Row ) = @_;
+
+  @Row = map{ s{^\s+}{}; s{\s+$}{};$_; } @Row;
+
+  my $MacrosApplied = injectMacros( "FIELD" , $LineNumber , @Row );
+  return if $MacrosApplied;
+
+  # Increment field number
+  $FieldNumber++;
+
+  # Change certain data type
+  my $DataType = $Row[2];
+  $DataType = "L" if $DataType eq "C";
+
+  # Remove fact name from field name
+  my $FieldName = $Row[1];
+  $FieldName =~ s{^.*\.}{};
+
+  # Change "J" into "1" for ceration rows
+  for my $i ( qw( 3 4 5 20 ) )
+  {
+    $Row[$i] = $Row[$i] || 0;
+    $Row[$i] = 1 if $Row[$i] eq "J";
+  }
+
+  # Save Nst table name if present
+  $NstTables->{$Row[7]} = 1 if( $Row[7] );
+
+  # Save foreign keys if present
+  if( $Row[18] )
+  {
+    my @Keys = split( /,/ , $Row[18] );
+    for my $Column ( @Keys )
+    {
+      my( $TargetTable , $TargetColumn ) = ( $Column =~ m{(.+?)\s*\((.+?)\)} );
+      die "No target table for foreign key of $CurrentFact.$FieldName found, stopped" if ! $TargetTable;
+      die "No target table column for foreign key of $CurrentFact.$FieldName found, stopped" if ! $TargetColumn;
+      $ForeignKey->{$CurrentFact}->{$FieldName}->{$TargetTable}->{$TargetColumn} = 1;
+    }
+  }
+
+  # Return field row
+  return[ $FactName , $Anweisung , $FieldNumber , $FieldName , $Row[0] , $Row[11] , $Row[12] , $Row[13] , $DataType , $Row[6] || 0 , 0 , "" , $Row[9] , $Row[17] , $Row[10] || 0 , $Row[3] , $Row[4] , $Row[5] , $Row[7] , $Row[19] , $FactNumber , $Row[20] , $Row[16] , $Row[29] ];
+}
+# handleFieldRow }}}
+
+# injectMacros {{{
+sub injectMacros
+{
+  my $Source = shift;
+  my $LineNumber = shift;
+  my @Row = @_;
+
+  # Get all macros which should be applied for this row
+  my @Macros = ( $Row[15] =~ m{(<.*?>)}g );
+  @Macros = map{ s/\s//g; $_ } @Macros;
+  return if ! @Macros;
+
+  # Each field which is marked as multiple and which has 
+  # no subset number assigned has to get a subset number.
+  # This subset number is the maximum subset number of
+  # current fact incremented by 1.
+  if( $Source && $Source eq "FIELD" )
+  {
+    if( $Row[5] eq "J" && ! $Row[10] )
+    {
+      ( my $ThisFactName = $Row[1] ) =~ s{\..*}{};
+      $MaxSubsetNumber->{$ThisFactName}++;
+      $Row[10] = $MaxSubsetNumber->{$ThisFactName};
+    }
+  }
+
+  # Loop over those macros
+  my $MacrosApplied = 0;
+  for my $Macro( @Macros )
+  {
+    # Non supported macro-like definitions
+    next if $Macro =~ /^<interp:/;
+
+    # Increment the number of applied macros
+    $MacrosApplied++;
+
+    # End if undefined macro found
+    die "Macro '$Macro, line $LineNumber, not found\n" if ! $Macros->{$Macro};
+
+    # Get all rows for current macro
+    my @MacroRows = @{$Macros->{$Macro}->{rows}};
+
+    # Check for correct action
+    if( $Source && $Source eq "FIELD" )
+    {
+      die "Macros on FIELD level support only action '<ersetzen>' but we got '$Macros->{$Macro}->{action}'\n" if $Macros->{$Macro}->{action} !~ m/<ersetzen>/;
+    }
+    elsif( $Source && $Source eq "FACT" )
+    {
+      die "Macros on FACT level support only action '<einf.*gen>' but we got '$Macros->{$Macro}->{action}'\n" if $Macros->{$Macro}->{action} !~ m/<einf.*gen>/;
+    }
+
+    # Loop over macro rows {{{
+    for my $MacroRow ( @MacroRows )
+    {
+      # Replace placeholders in macro {{{
+      my @MRow = ();
+      for my $i ( 0..( scalar( @$MacroRow )-1 ) )
+      {
+        my $Cell = $MacroRow->[$i];
+        # Replace quelle keyword
+        if( $Cell eq "<quelle>" )
+        {
+          push( @MRow , $Row[$i] );
+        }
+        # Replace macro name
+        elsif( $Cell =~ /$Macro/ )
+        {
+          $Cell =~ s{$Macro}{$Row[$i]}g;
+          push( @MRow , $Cell );
+        }
+        # Copy cell content
+        else
+        {
+          push( @MRow , $Cell );
+        }
+      }
+      # Replace placeholders in macro }}}
+
+      # Check for presence of data type field
+      if( ! $MRow[2] )
+      {
+        die "No data type, line $LineNumber\n";
+      }
+      # Handle supported data types by copying rows macro rows to output row set
+      elsif( $MRow[2] =~ /^(?:I|S|D|C|L|W|R)$/ )
+      {
+        my $TempRow = handleFieldRow( $LineNumber , @MRow );
+        push( @FieldRows , $TempRow ) if $TempRow;
+      }
+      # End if not supported data type found
+      else
+      {
+        die "Data type '$MRow[2]' not supported\n";
+      }
+    }
+    # Loop over macro rows }}}
+  }
+
+  $MacrosApplied;
+}
+# injectMacros }}}
+
+# analyzeVersionSheet {{{
+sub analyzeVersionSheet
+{
+  my $GeneralSheet = shift;
+
+  die "No sheet 'general' found.\n" if ! $GeneralSheet;
+
+  my $Info = {};
+  my $GeneralDbdir = [];
+  my $GeneralLookup = [];
+  my $Sections = {};
+  my %VersionSections = map{ ($_,1) } qw( GENERAL GENERAL_DBDIR GENERAL_LOOKUP FILES COUPLEINDEX COUPLEFIELDS KEYWORDS TABELLEN TABELLENBESCHREIBUNG TABLESPACES );
+
+  my $Section = undef;
+  for my $i ( 1..$GeneralSheet->maxrow )
+  {
+    my @Row = $GeneralSheet->row( $i );
+    @Row = map{ defined $_ ? $_ : "" } @Row;
+    my $Cell1 = $Row[0];
+    my $Cell2 = $Row[1];
+
+    # Section start {{{
+    if( ! $Section )
+    {
+      if( $Cell1 )
+      {
+        if( $Cell2 )
+        {
+          die "Row $i in sheet version should be a header line but has content in 2nd column.\n";
+        }
+        $Section = $Cell1;
+
+        if( grep{ /^$Section$/i } keys %VersionSections )
+        {
+          ml( "Found valid section $Section\n" );
+          delete $VersionSections{uc $Section};
+        }
+        else
+        {
+          die "Section $Section in row $i is invalid.\n";
+        }
+      }
+    }
+    # Section start }}}
+    # Section end {{{
+    elsif( $Cell1 eq "ENDE" )
+    {
+      if( $Cell2 )
+      {
+        die "Row $i in sheet version should be a end line but has content in 2nd column.\n";
+      }
+      $Section = undef;
+    }
+    # Section end }}}
+    # Lines in sections {{{
+    elsif( $Section )
+    {
+      # Lines in section GENERAL_* {{{
+      if( $Section =~ m/^GENERAL_(?:DBDIR|LOOKUP)$/ )
+      {
+        my $Line = "";
+        if( $Cell1 || $Cell2 )
+        {
+          $Line = sprintf( "%s=%s;" , defined $Cell1 ? uc $Cell1 : "" , defined $Cell2 ? $Cell2 : "" );
+          my $maxl = 72;
+          if( length( $Line ) >= $maxl )
+          {
+            my @p = split( /,/ , $Line );
+            my $l = "";
+            my $ll = 0;
+            while( @p )
+            {
+              my $np = shift( @p );
+              my $npl = length( $np ) + 1;
+              if( $ll + $npl > $maxl )
+              {
+                $l = $l . "\n";
+                $ll = 0;
+              }
+              $ll = $ll + $npl;
+              $l = $l . $np . ",";
+            }
+            ( $Line = $l ) =~ s{,$}{};
+          }
+        }
+        if( $Section eq "GENERAL_DBDIR" )
+        {
+          push( @$GeneralDbdir , $Line );
+        }
+        elsif( $Section eq "GENERAL_LOOKUP" )
+        {
+          push( @$GeneralLookup , $Line );
+        }
+      }
+      # Lines in section GENERAL_* }}}
+      # Lines in section GENERAL_LOOKUP {{{
+      elsif( $Section eq "GENERAL_LOOKUP" )
+      {
+        #$Info->{NstTables} = $Cell2 if $Cell1 =~ /^tables$/i;
+      }
+      # Lines in section GENERAL_LOOKUP }}}
+      # Lines in section GENERAL {{{
+      elsif( $Section eq "GENERAL" )
+      {
+        $Info->{DbdirXlsVersion} = $Cell2 if $Cell1 =~ /^dbdirxlsversion$/i;
+        $Info->{Version}         = $Cell2 if $Cell1 =~ /^version$/i;
+        $Info->{Date}            = $Cell2 if $Cell1 =~ /^versiondatum$/i;
+        $Info->{Schema}          = $Cell2 if $Cell1 =~ /^datenbankeigner$/i;
+        $Info->{Prefix}          = $Cell2 if $Cell1 =~ /^ausgabedateiname$/i;
+      }
+      # Lines in section GENERAL }}}
+      # Lines in section TABELLEN {{{
+      elsif( $Section eq "TABELLEN" )
+      {
+        $Info->{Tables}->{$Cell1} = $Cell2;
+      }
+      # Lines in section TABELLEN }}}
+      # Lines in other sections {{{
+      elsif( grep{ /^$Section$/ } qw{ FILES COUPLEINDEX COUPLEFIELDS KEYWORDS TABLESPACES } )
+      {
+        $Sections->{$Section}->{name} = $Section if ! $Sections->{$Section};
+        push( @{$Sections->{$Section}->{data}} , \@Row );
+      }
+      # Lines in other sections }}}
+    }
+    # Lines in sections }}}
+    # Lines outside sections {{{
+    else
+    {
+    }
+    # Lines outside sections }}}
+  }
+
+  if( keys %VersionSections )
+  {
+    die "Following required sections are undefined in version sheet: " . join( ", " , sort keys %VersionSections ) . ".\n" ;
+  }
+
+  die "No reference 'DbDir' found in sheet 'General'.\n" if ! $Info->{Tables}->{DbDir};
+  die "No reference 'Positionen' found in sheet 'General'.\n" if ! $Info->{Tables}->{Positionen};
+  die "No reference 'Einheiten' found in sheet 'General'.\n" if ! $Info->{Tables}->{Einheiten};
+  die "No reference 'Versionen' found in sheet 'General'.\n" if ! $Info->{Tables}->{Versionen};
+  die "Key 'DbdirXlsVersion' undefined - old style spreadsheet not supported.\n" if ! $Info->{DbdirXlsVersion};
+  die "DbdirXlsVersion less than $MinXlsVersion ($Info->{DbdirXlsVersion}).\n" if $Info->{DbdirXlsVersion} < $MinXlsVersion;
+
+  ( $Info , $GeneralDbdir , $GeneralLookup , $Sections );
+}
+# analyzeVersionSheet }}}
+
+sub ml
+{
+  print shift;
+}
+
+sub dl
+{
+  my $h = shift;
+  my $s = shift;
+
+  $s =~ s{\xe4}{ae}g;
+  $s =~ s{\xf6}{oe}g;
+  $s =~ s{\xfc}{ue}g;
+  $s =~ s{\xc4}{Ae}g;
+  $s =~ s{\xd6}{Oe}g;
+  $s =~ s{\xdc}{Ue}g;
+  $s =~ s{\xdf}{ss}g;
+
+  print $h $s;
+}
+
+__END__
+
+# Main docs {{{
+
+=head1 NAME
+
+xls2ascii - Converts an GSBL data structure from Excel to ASCII.
+
+=head1 SYNOPSIS
+
+xls2ascii [options]
+
+ Options:
+   -help            brief help message
+   -man             full documentation
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-dbdir file>
+
+The name of the output dbdir file. Required.
+
+=item B<-help>
+
+Print a brief help message and exits.
+
+=item B<-man>
+
+Prints the manual page and exits.
+
+=item B<-spreadsheet file>
+
+The name of the input Excel file. Required.
+
+=item B<-tables file>
+
+The name of the output tables file. Required.
+
+=item B<-units file>
+
+The name of the output units file. Required.
+
+=back
+
+=head1 DESCRIPTION
+
+B<xls2ascii> reads an Excel spreadsheet defining a data structure and dumps the
+content in ASCII format which can be used ny Impserv and other programs. It does
+not create database creation files - there are other programs doing this task
+which are running on the created ASCII files.
+
+The program requires one input file, the Excel spreadheet, and three output file
+names, the name of the database directory (typically B<dbdir.tab>), the name
+of the tables files containing the ASCII version of T_NST (typically B<tables.tab>),
+and the name of the unit table (typically B<units.tab>).
+
+In contrast to the original Excel macro doing the same job, it does not rely on any
+templates or hard coded stuff, like POSITIONS section which was not defined in
+original spreadsheet.
+
+The only things hard coded are the column positions. So please don't insert a column
+in the middle since this will break the application.
+
+The spreadsheet scanner is not the fastest one. It reads all data in memory which
+may easily take several seconds during startup. So please be patient.
+
+=head1 TESTS
+
+This programm has been tested with RX data structure.
+
+The generated dbdir files are identical except for 2 comment blocks and the version
+line.
+
+The generated table file differs slightly from the original one. There are some reasons:
+
+=over 4
+
+=item B<Columns>
+
+The original version generated with old software has only 4 columns while
+all update dumps have 5 columns. So I decided to dump always 5 columns.
+
+=item B<Order>
+
+The original version generated with old software is dumped in an unordered
+way. B<xls2asci> sort the output by tablename and number as second sort key.
+
+=back
+
+The generated unit file differs from the original one. The original one
+had serious problems which real number which were dumped incorrectly.
+For example, unit #28 of section "pressure" is defined in Excel with
+a factor of exactly "1" but original software produced "0.980665"
+what is by far too different.
+But those are the only differences in units table.
+
+=head1 TODO
+
+Collection of things to be implemented.
+
+=over 4
+
+=item B<Copyright>
+
+To be added on top of files.
+
+=item B<Logging>
+
+Replace B<ml> with B<log4perl>.
+
+=back
+
+=head1 TODO
+
+=over 4
+
+=item B<Unique Indexes>
+
+Support unique indexes, single ones. Those will start with "U".
+
+=item B<Composite Indexes>
+
+Support composite indexes. Those will start with "C".
+
+=item B<Unique Composite Indexes>
+
+Support unique composite indexes. Those will start with "UC".
+
+=back
+
+=cut
+
+# Main docs }}}

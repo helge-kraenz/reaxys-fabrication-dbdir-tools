@@ -1,0 +1,37 @@
+Features:
+
+* Spreadsheet support
+All different kind of spreadsheet formats supported
+
+* Two step approach
+First step converts XLS into dbdir.tab, tables.tab, units.tab.
+Second step creates SQL command from the 3 tab files.
+
+* Perl based
+Perl based and portable.
+
+* Tablespace support (to be implemented)
+Tablespace names can be defined in Spreadsheet
+
+* No static template files required
+
+* No hard coded stuff
+Exception: The spreadsheet is parsed positional.
+
+* Removal of LONG
+Replaced by CLOB/TEXT
+
+* Postgres support (to be implemented)
+
+* Additional indexes (to be implemented)
+Unique, composite and unique composite indices supported
+
+* Consistency check
+Spreadsheet is checked for consistency
+
+* CI/CD support
+Can be used by Jenkins
+
+* Meaningful error messages
+
+

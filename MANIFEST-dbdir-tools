@@ -1,0 +1,6 @@
+./bin/dbdir2sql
+./bin/units2sql
+./bin/xls2ascii
+./MANIFEST-dbdir-tools
+./README
+setup.sh

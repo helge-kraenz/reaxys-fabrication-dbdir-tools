@@ -1,0 +1,648 @@
+#! /usr/bin/env perl
+
+# BUGS:
+# - Original Excel macro has one bug:
+#   It tries to create indices fields of a subtable in parent 
+#   table what has to fail because this field is not in parent
+#   table anymore
+
+=head1 NAME
+
+dbdir2sql - Converts dbdir to SQL script.
+
+=cut
+
+# Modules and pragmas {{{
+use strict;
+use warnings;
+use Data::Dumper;
+use Getopt::Long;
+use Pod::Usage;
+# Modules and pragmas }}}
+
+# Global variables used in subroutines as well {{{
+our $Version          = 1.0.0;
+our $CompositeIndexes = 0;
+our $UpDown           = 0;
+our $Separator        = "-" x 30;
+our $UpTemplate       = "$Separator\n" . "-- UP   %6d ---------------\n" . "$Separator\n\n";
+our $DownTemplate     = "$Separator\n" . "-- DOWN %6d ---------------\n" . "$Separator\n\n";
+# Global variables used in subroutines as well }}}
+
+# Command line variables {{{
+my  $DbdirFile        = undef;
+my  $TableFile        = undef;
+my  $SpezFile         = undef;
+my  $Man              = undef;
+my  $Help             = undef;
+my  $Style            = "Postgres";
+my  $Oracle           = undef;
+my  $VersionParameter = undef;
+# Command line variables }}}
+
+# Command line parsing {{{
+
+# Docs {{{
+
+=head1 SYNOPSIS
+
+xls2ascii [options]
+
+ Options:
+   -comp            turns composite index handling on
+   -dbdir <file>    specifies dbdir file
+   -help            brief help message
+   -man             full documentation
+   -oracle          oracle style commands
+   -spez <file>     specifies spez output file
+   -table <file>    specifies table output file
+   -version         print version
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-comp>
+
+Turns on composite index handling. Default is off.
+
+=item B<-dbdir file>
+
+The name of the input dbdir file. Required.
+
+=item B<-help>
+
+Print a brief help message and exits.
+
+=item B<-man>
+
+Prints the manual page and exits.
+
+=item B<-oracle>
+
+Create Oracle style commands. If not given Postgres sytel command are created.
+
+=item B<-spez file>
+
+The name of the output spez file. Required.
+
+=item B<-table file>
+
+The name of the output table file. Required.
+
+=item B<-version>
+
+Prints the version and exits.
+
+=back
+
+=cut
+
+# Docs }}}
+
+GetOptions( "compositeindexes" => \$CompositeIndexes , "dbdir=s" => \$DbdirFile , "help" => \$Help , "man" => \$Man , "oracle" => \$Oracle , "spez=s" => \$SpezFile , "table=s" => \$TableFile , "version" => \$VersionParameter );
+# Command line parsing }}}
+
+# Check command line parameters {{{
+pod2usage( 1 ) if $Help;
+pod2usage( -verbose => 2 ) if $Man;
+pod2usage( "$0: No input dbdir file given" ) if( ! $DbdirFile );
+pod2usage( "$0: No output table file given" ) if( ! $TableFile );
+pod2usage( "$0: No output spez file given" ) if( ! $SpezFile );
+$Style = "Oracle" if $Oracle;
+
+if( $VersionParameter )
+{
+  ml( "This is $0, version $Version\n" );
+  exit;
+}
+# Check command line parameters }}}
+
+# Process DBDIR
+processDbdir( $DbdirFile , $TableFile , $SpezFile , $Style );
+
+exit;
+
+# processDbdir {{{
+sub processDbdir 
+{
+  my $File      = shift;
+  my $TableFile = shift;
+  my $SpezFile  = shift;
+  my $Style     = shift;
+
+  # Read in data {{{
+  my $Fh = undef;
+  open( $Fh , "<" , $File ) or die "$File: $!\n";
+
+  my @Facts = ();
+  my $Fields = {};
+  my $Fk = {};
+  my $Section = "";
+  while( <$Fh> )
+  {
+    chomp;
+    if( /^\[/ )
+    {
+      ( $Section ) = m{\[(.*?)\]};
+      next;
+    }
+    next if ! $_;
+
+    if( $Section eq "FACTS" )
+    {
+      my @Cols = split( /\|/ );
+      my $Fact = 
+      {
+        Group     => $Cols[1],
+        Name      => $Cols[3],
+        Section   => $Cols[6],
+        Datatype  => $Cols[8],
+        TableName => $Cols[22],
+      };
+      push( @Facts , $Fact );
+    }
+    elsif( $Section eq "FIELDS" )
+    {
+      my @Cols = split( /\|/ );
+      my $Field = 
+      {
+        Fact     => $Cols[0],
+        Section  => $Cols[1],
+        Name     => $Cols[3],
+        Type     => $Cols[8],
+        Length   => $Cols[9],
+        Index    => $Cols[13],
+        SubSet   => $Cols[14],
+        NotNull  => $Cols[16],
+        SubTable => $Cols[22],
+      };
+      push( @{$Fields->{$Cols[0]}} , $Field );
+    }
+    elsif( $Section eq "FOREIGNKEYS" )
+    {
+      my( $St, $Sc , $Tt, $Tc ) = split( /\|/ );
+      next if ! $St;
+      next if ! $Sc;
+      $Fk->{$St}->{$Sc}->{TargetTable} = $Tt;
+      $Fk->{$St}->{$Sc}->{TargetColumn} = $Tc;
+    }
+  }
+  close( $Fh );
+  # Read in data }}}
+
+  # Create table structure {{{
+  my $Tables = {};
+  my $TableNumber = 0;
+  for my $Fact ( @Facts )
+  {
+    my $TableName = $Fact->{TableName};
+    my $FactName = $Fact->{Name};
+    my $Group = $Fact->{Group};
+    $TableNumber++;
+    $Tables->{$TableName}->{Number}      = $TableNumber;
+    $Tables->{$TableName}->{Name}        = $TableName;
+    $Tables->{$TableName}->{Group}       = $Group;
+    $Tables->{$TableName}->{PrimaryKey}  = [];
+    $Tables->{$TableName}->{IndexNumber} = 0;
+    $Tables->{$TableName}->{Indices}     = {};
+    $Tables->{$TableName}->{FKeyNumber}  = 0;
+    $Tables->{$TableName}->{FKeys}       = {};
+
+    if( $Group ne "SPEZ" && $TableName eq "T_MRKML" )
+    {
+      ml( "Fact $FactName skipped because target table is T_MRKML\n" );
+      next;
+    }
+
+    for my $Field ( @{$Fields->{$FactName}} )
+    {
+      my $TargetTableName = $Field->{SubTable} || $TableName;
+
+      # Handle sub table fields {{{
+      if( $TargetTableName ne $TableName )
+      {
+        my $SubSet = $Field->{SubSet};
+
+        if( ! $Tables->{$TargetTableName} )
+        {
+          $TableNumber++;
+          $Tables->{$TargetTableName}->{Number}      = $TableNumber;
+          $Tables->{$TargetTableName}->{Name}        = $TargetTableName;
+          $Tables->{$TargetTableName}->{SubSet}      = $SubSet || "";
+          $Tables->{$TargetTableName}->{Group}       = $Field->{Section};
+          $Tables->{$TargetTableName}->{PrimaryKey}  = [ "NR" ];
+          $Tables->{$TargetTableName}->{ForeignKeys} = [];
+          $Tables->{$TargetTableName}->{IndexNumber} = 2;
+          $Tables->{$TargetTableName}->{Indices}->{A1}->{Number} = 1;
+          $Tables->{$TargetTableName}->{Indices}->{A1}->{Fields} = [ "RN" ];
+          $Tables->{$TargetTableName}->{Indices}->{A2}->{Number} = 2;
+          $Tables->{$TargetTableName}->{Indices}->{A2}->{Fields} = [ "MKNR" ];
+          push( @{$Tables->{$TargetTableName}->{Rows}} , getRow( $Style , "RN" , "I" , "12" , 1 ) );
+          push( @{$Tables->{$TargetTableName}->{Rows}} , getRow( $Style , "NR" , "I" , "12" , 1 ) );
+          push( @{$Tables->{$TargetTableName}->{Rows}} , getRow( $Style , "MKNR" , "I" , "12" , 1 ) );
+          if( $SubSet )
+          {
+            push( @{$Tables->{$TargetTableName}->{Rows}} , getRow( $Style , "SKNR" , "I" , "12"  ) );
+            $Tables->{$TargetTableName}->{IndexNumber}++;
+            $Tables->{$TargetTableName}->{Indices}->{A3}->{Number} = 3;
+            $Tables->{$TargetTableName}->{Indices}->{A3}->{Fields} = [ "SKNR" ];
+          }
+        }
+        else
+        {
+          die "Subtable $TargetTableName has different subset numbers, $Tables->{$TargetTableName}->{SubSet} and $SubSet\n" if( $SubSet && $Tables->{$TargetTableName}->{SubSet} ne $SubSet );
+        }
+      }
+      # Handle sub table fields }}}
+
+      push( @{$Tables->{$TargetTableName}->{Rows}} , getRow( $Style , $Field->{Name} , $Field->{Type} , $Field->{Length} , $Field->{NotNull} ) );
+
+      # Handle indices of table {{{
+      my $Indexes = $Field->{Index};
+      for my $Index ( split( /,/ , $Indexes ) )
+      {
+        if( $Index )
+        {
+          if( $Index =~ /^pk/i )
+          {
+            push( @{$Tables->{$TableName}->{PrimaryKey}} , $Field->{Name} );
+          }
+          elsif( $Index =~ /^i/i )
+          {
+
+# Here things are getting tricky. This code implements composite indexes,
+# i.e. when an index with the same name exists for a certain table the index
+# is treated as composite index and build over all fields with the same index.
+# But this is not what the old export macro generated.
+            if( $CompositeIndexes )
+            {
+              if( ! $Tables->{$TargetTableName}->{Indices}->{$Index} )
+              {
+                $Tables->{$TargetTableName}->{IndexNumber}++;
+                $Tables->{$TargetTableName}->{Indices}->{$Index}->{Number} = $Tables->{$TargetTableName}->{IndexNumber};
+              }
+              push( @{$Tables->{$TargetTableName}->{Indices}->{$Index}->{Fields}} , $Field->{Name} );
+            }
+# No composite index support
+            else
+            {
+              $Tables->{$TargetTableName}->{IndexNumber}++;
+              $Tables->{$TargetTableName}->{Indices}->{$Tables->{$TargetTableName}->{IndexNumber}}->{Fields} = [ $Field->{Name} ];
+              $Tables->{$TargetTableName}->{Indices}->{$Tables->{$TargetTableName}->{IndexNumber}}->{Number} = $Tables->{$TargetTableName}->{IndexNumber};
+            }
+          }
+          elsif( $Index =~ /^fk/i )
+          {
+            my $St = $TargetTableName;
+            my $Sc = $Field->{Name};
+            my $Tt = $Fk->{$St}->{$Sc}->{TargetTable};
+            my $Tc = $Fk->{$St}->{$Sc}->{TargetColumn};
+            if( ! $Tt )
+            {
+              die "No target table for foreign key on $St.$Sc found, stopped";
+            }
+            if( ! $Tc )
+            {
+              die "No target column for foreign key on $St.$Sc found, stopped";
+            }
+            $Tables->{$TargetTableName}->{FKeyNumber}++;
+            $Tables->{$TargetTableName}->{FKeys}->{$Tables->{$TargetTableName}->{FKeyNumber}}->{Number} = $Tables->{$TargetTableName}->{FKeyNumber};
+            $Tables->{$TargetTableName}->{FKeys}->{$Tables->{$TargetTableName}->{FKeyNumber}}->{SourceTable} = $St;
+            $Tables->{$TargetTableName}->{FKeys}->{$Tables->{$TargetTableName}->{FKeyNumber}}->{SourceColumn} = $Sc;
+            $Tables->{$TargetTableName}->{FKeys}->{$Tables->{$TargetTableName}->{FKeyNumber}}->{TargetTable} = $Tt;
+            $Tables->{$TargetTableName}->{FKeys}->{$Tables->{$TargetTableName}->{FKeyNumber}}->{TargetColumn} = $Tc;
+
+            ml( "Creating reference from $St.$Sc to $Tt.$Tc\n" );
+          }
+          else
+          {
+            die "Unsupported index type $Index, stopped";
+          }
+        }
+      }
+      # Handle indices of table }}}
+    }
+  }
+  # Create table structure }}}
+
+  # Dump SQL statements {{{
+  my $Fhs = {};
+  open( $Fhs->{MERKMAL} , ">" , $TableFile ) or die "$TableFile: $!\n";
+  open( $Fhs->{SPEZ} , ">" , $SpezFile ) or die "$SpezFile: $!\n";
+  for my $TableName ( sort {$Tables->{$a}->{Number} <=> $Tables->{$b}->{Number}} keys %$Tables )
+  {
+    my $Table = $Tables->{$TableName};
+    my $Number = $Table->{Number};
+    ml( "Creating table #$Number $TableName\n" );
+
+    # Get output file handle {{{
+    my $Group = $Table->{Group};
+    die "No section for table $TableName defined, " if ! $Group;
+    die "No associated output stream for section $Group found, " if ! $Fhs->{$Group};
+    my $Fh = $Fhs->{$Group};
+    # Get output file handle }}}
+
+    # Generate create table statement {{{
+    my @Rows = ();
+    for my $Row ( @{$Table->{Rows}} )
+    {
+      my $Type = $Row->{Type};
+      my $Len  = $Row->{Length} ? "($Row->{Length})" : "";
+
+      my $Line = sprintf( "     %-24s %-24s %s" , $Row->{Name} , $Type . $Len , join( " " , @{$Row->{Conditions}} ) );
+      push( @Rows , $Line );
+    }
+    my $CreateStatement = "CREATE TABLE $TableName (\n" . join( ",\n" , @Rows ) . "\n);";
+    $UpDown++;
+    printf $Fh $UpTemplate , $UpDown;
+    print $Fh "$CreateStatement\n\n";
+    printf $Fh $DownTemplate , $UpDown;
+    print $Fh "--DROP TABLE $TableName\n\n";
+    # Generate create table statement }}}
+
+    # Generate primary key statement {{{
+    my $PrimaryKeys = $Table->{PrimaryKey};
+    if( @$PrimaryKeys )
+    {
+      my $Fields = join( "," , @$PrimaryKeys );
+      my $ConstraintName = lc "pk_$TableName";
+
+      my $AlterStatement = "ALTER TABLE $TableName ADD (\n     CONSTRAINT $ConstraintName PRIMARY KEY ($Fields)\n     );";
+      $UpDown++;
+      printf $Fh $UpTemplate , $UpDown;
+      print $Fh "$AlterStatement\n\n";
+      printf $Fh $DownTemplate , $UpDown;
+      print $Fh "--ALTER TABLE $TableName DROP CONSTRAINT $ConstraintName;\n\n";
+    }
+    # Generate primary key statement }}}
+
+    # Generate foreign keys {{{
+    for my $Index ( sort{ $Table->{FKeys}->{$a}->{Number} <=> $Table->{FKeys}->{$b}->{Number} } keys %{$Table->{FKeys}} )
+    {
+      my $FKey = $Table->{FKeys}->{$Index};
+      my $ConstraintName = lc "fk_$FKey->{SourceTable}_$FKey->{SourceColumn}";
+      my $CreateStatement = "ALTER TABLE $FKey->{SourceTable} ADD (\n     CONSTRAINT $ConstraintName FOREIGN KEY ($FKey->{SourceColumn})\n     REFERENCES $FKey->{TargetTable}($FKey->{TargetColumn}) );";
+      $UpDown++;
+      printf $Fh $UpTemplate , $UpDown;
+      print $Fh "$CreateStatement\n\n";
+      printf $Fh $DownTemplate , $UpDown;
+      print $Fh "--ALTER TABLE $FKey->{SourceTable} DROP CONSTRAINT $ConstraintName;\n\n";
+    }
+    # Generate foreign keys }}}
+
+    # Generate indizes {{{
+    for my $Index ( sort{ $Table->{Indices}->{$a}->{Number} <=> $Table->{Indices}->{$b}->{Number} } keys %{$Table->{Indices}} )
+    {
+      my $Fields = join( "," , @{$Table->{Indices}->{$Index}->{Fields}} );
+      my $FieldsUnderscore = join( "_" , @{$Table->{Indices}->{$Index}->{Fields}} );
+      my $IndexName = lc "i_$TableName\_$FieldsUnderscore";
+      my $CreateStatement = "CREATE INDEX $IndexName\n     ON $TableName ($Fields);";
+      $UpDown++;
+      printf $Fh $UpTemplate , $UpDown;
+      print $Fh "$CreateStatement\n\n";
+      printf $Fh $DownTemplate , $UpDown;
+      print $Fh "--DROP INDEX $IndexName;\n\n";
+    }
+    # Generate indizes }}}
+  }
+  for my $Fh ( keys %$Fhs )
+  {
+    close( $Fh );
+  }
+  # Dump SQL statements }}}
+}
+# processDbdir }}}
+
+# getRow {{{
+# Generates a row entry for a given row in a give table. Includes the correct data type.
+sub getRow
+{
+  my( $Style , $Name , $Type , $Length , $NotNull ) = @_;
+
+  my $Row = {};
+
+  die "No name given\n" if ! $Name;
+  die "No type given for row $Name\n" if ! $Type;
+
+  $Row->{Name} = $Name;
+  push( @{$Row->{Conditions}} , $NotNull ? "NOT NULL" : "NULL" );
+
+  # Oracle style commands {{{
+  if( $Style =~ /oracle/i )
+  {
+    if( $Type eq "I" )
+    {
+      $Row->{Type}   = "NUMBER";
+      $Row->{Length} = $Length;
+      $Row->{Length} = 12;
+    }
+    elsif( $Type eq "S" )
+    {
+      $Row->{Type}   = "VARCHAR2";
+      $Row->{Length} = $Length;
+    }
+    elsif( $Type eq "D" )
+    {
+      $Row->{Type}   = "DATE";
+      $Row->{Length} = $Length;
+    }
+    elsif( $Type eq "R" )
+    {
+      $Row->{Type}   = "NUMBER";
+      $Row->{Length} = undef;
+    }
+    elsif( $Type eq "L" )
+    {
+      $Row->{Type}   = "CLOB";
+      $Row->{Length} = undef;
+    }
+    else
+    {
+      die "Unsupported type '$Type' for row $Name\n";
+    }
+  }
+  # Oracle style commands }}}
+
+  # Postgres style commands {{{
+  elsif( $Style =~ /postgres/i )
+  {
+    if( $Type eq "I" )
+    {
+      $Row->{Type}   = "NUMERIC";
+      $Row->{Length} = $Length;
+      $Row->{Length} = 12;
+    }
+    elsif( $Type eq "S" )
+    {
+      $Row->{Type}   = "VARCHAR";
+      $Row->{Length} = $Length;
+    }
+    elsif( $Type eq "D" )
+    {
+      $Row->{Type}   = "TIMESTAMP";
+      $Row->{Length} = $Length;
+    }
+    elsif( $Type eq "R" )
+    {
+      $Row->{Type}   = "NUMERIC";
+      $Row->{Length} = undef;
+    }
+    elsif( $Type eq "L" )
+    {
+      $Row->{Type}   = "TEXT";
+      $Row->{Length} = undef;
+    }
+    else
+    {
+      die "Unsupported type '$Type' for row $Name\n";
+    }
+  }
+  # Postgres style commands }}}
+
+  $Row;
+}
+# getRow }}}
+
+# ml {{{
+# Print log entry. Currently simply prints to stdout but this
+# may change in future.
+sub ml
+{
+  print shift;
+}
+# ml }}}
+
+__END__
+
+# Main docs {{{
+
+=head1 DESCRIPTION
+
+B<dbdir2sql> reads a DBDIR file as generated by B<ascii2dbdir> and converts this into
+SQL statements creating the database. The statements wre dumpped to 2 output files
+- mainly for historical reasons.
+
+The program does not execute the SQL statements and consequently requires no database driver
+and no database connection. Instead standard tools like SQLPlus (Oracle) and psql
+(PostgreSQL) can be used to create the data structure.
+
+The program has 3 major steps: The first step reads the content of the DBDIR file
+into memory. The second step reorganizes the internal representation of the data
+and the third step dumps the data to the output files.
+
+The first step which reads in the data uses three different sections of the DBDIR. All others
+are ignored. The sections are FIELDS, FACTS, and FOREIGNKEYS. All non-empty lines in each
+sections are considered as a valid entry. A valid entry is a line containing of
+several columns separated by a pipe ('|'). The number of required columns depends on the
+section.
+
+For section FACTS 23 columns are required of which only column 2, 4, 7, 9, 23 are
+stored. All others are ignored. For section FIELDS column 23 columns are required of
+which column 1, 2, 4, 9, 10, 14, 15, 17, 23 are used.
+Section FOREIGNKEYS finally is a little bit different than the previous ones. It requires
+only 4 columns (1, 2, 3, 4). The reason why this column is different is simply that it's
+not included in the DBDIR as it was used in the past. This one is an artificial column
+introduced by <xls2ascii> and the reason is that some information from the Excel spreadsheet
+are required for database creation which are not stored the th DBDIR. For this information,
+the foreign keys relations, this section was introduced. It doesn't have any influence
+on other programs because all programs will simply ignore unknown section.
+
+The second step reorganizes the data read in step one. It creates an internal representation
+for each table to be created. It takes care of implicitely defined columns required for
+different table types like subtables etc. The information about the indexes for each table
+are stored along the the table definition.
+
+The third step finally loops over the tables and creates for each table (in this order) statments
+to create the table, create the primary key, create foreign keys, and create indices.
+
+=head1 TESTS
+
+This programm has been tested with RX data structure.
+
+The generated output files are identical with those generated by Excel macro (*.mkt and *.spz)
+except for some differences.
+
+There reasons are:
+
+=over 4
+
+=item B<Comments>
+
+The original version generated with the Excel macro used the keyword "REM" for comments.
+This is Oracle specific.
+The new version does not contain any comments at all. Comments will be introduced in a later
+version but then the standard SQL commenting will be used which is "--".
+
+=item B<Prompt>
+
+The lines with "PROMPT" are specific to SQLPlus of Oracle. Removed.
+
+=item B<Tablespaces>
+
+Different tablespaces are not yet supported. Those will be introduced in one of the next
+versions. This is a discussion point because tablespace names were not stored in Excel
+spreadsheet for some reasons but have been passed to the creation script during the
+invocation of the script as parameter.
+
+I'd prefer to code this information directly into the generated SQL files.
+
+=item B<Empty Lines>
+
+Empty lines are not generated in new version.
+
+=back
+
+=head1 TODO
+
+Collection of things to be implemented.
+
+=over 4
+
+=item B<Copyright>
+
+To be added on top of files.
+
+=item B<Logging>
+
+Replace B<ml> with B<log4perl>.
+
+=over 4
+
+=item B<Tablespace support>
+
+Add tablespaces to generated commands.
+
+=item B<Foreign Keys>
+
+Foreign key constraints.
+
+=item B<Postgres version>
+
+Postgres support implementation.
+
+=item B<Unique Indexes>
+
+Support unique indexes, single ones. Those will start with "U".
+
+=item B<Composite Indexes>
+
+Support composite indexes. Those will start with "C".
+
+=item B<Unique Composite Indexes>
+
+Support unique composite indexes. Those will start with "UC".
+
+=item B<Incremental build>
+
+Support unique composite indexes. Those will start with "UC".
+
+=item B<Comments>
+
+Support unique composite indexes. Those will start with "UC".
+
+=back
+
+=cut
+
+# Main docs }}}
