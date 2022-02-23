@@ -3,6 +3,9 @@
 This repository contains some tools to create the control tables required
 for running INDIs and their associated SQL scripts directly from command line.
 
+The sources are stored in AWS along with the test environment in
+s3://nameservice/releases/dbdir-tools/
+
 # Features
 
 * Wide spreadsheet support
