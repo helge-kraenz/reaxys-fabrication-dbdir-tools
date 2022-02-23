@@ -39,6 +39,11 @@ Spreadsheet is checked for consistency
 
 Can be used by Jenkins
 
+* Documentation included
+
+The documentation of the programs is included and can be reached either 
+via `perldoc <program>` or `<program> -m`
+
 * Meaningful error messages
 
 # Removed features
@@ -50,7 +55,11 @@ fields are ignored and won't be injected.
 
 # Todo
 
-* Tablespace support
+* Log4Perl Support
+
+log4perl should be supported.
+
+* Tablespace Support
 
 Tablespace names can be defined in Spreadsheet
 
